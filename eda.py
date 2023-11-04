@@ -148,6 +148,8 @@ if __name__ == "__main__":
 	corr = avg_player_corr(fwds, regressors, 15)
 	sns.heatmap(corr, annot=True)
 
+	# 
+
 	# Plot the selected regressors over the gameweeks
 	# g = sns.PairGrid(df[regressors])
 	# g.map(sns.scatterplot)
