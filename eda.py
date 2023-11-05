@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
+import statsmodels.api as sm
 
 class Position(Enum):
 	GKP = 1
@@ -47,12 +48,28 @@ def recent_stats(player_id: int, lookback: Optional[int] = None):
 	else:
 		return df.iloc[-lookback:, :].apply(float_map)
 	
-def player_data(position: Position):
+def player_data(position: Position, sorted: bool = False):
+	"""Retrieve player data on a positional basis with the option to sort.
+
+	Args:
+		position (Position): _description_
+		sorted (bool): _description_
+
+	Returns:
+		_type_: _description_
+	"""
+	# Query
 	response = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/")
 	data = json.loads(response.text)
 	players = data.get("elements")
+	# Create df
 	df = pd.DataFrame.from_dict(players)
-	return df[df["element_type"]==position.value].apply(float_map)
+	# Filter by position and sort
+	df = df[df["element_type"]==position.value].apply(float_map)
+	if sorted:
+		df = df.sort_values(by=["total_points"], ascending=False)
+		df = df.reset_index(drop=True)
+	return df
 
 def featurizer(df: pd.DataFrame):
 	"""Creates features from the dataframe.
@@ -75,6 +92,20 @@ def featurizer(df: pd.DataFrame):
 	df["xA-A"] = df["expected_assists"] - df["assists"]
 	return df
 
+def num_players(players: pd.DataFrame, top_n: Optional[int]=None):
+	"""Sets either the ``top_n`` players by points, or all players.
+
+	Args:
+		top_n (Optional[int], optional): The number of players by points to look at. 
+		 Defaults to None.
+	"""
+	# Calculate number of players to search for
+	if top_n is None:
+		n = len(players)
+	else:
+		n = min(top_n, len(players))
+	return n
+
 def avg_player_corr(players: pd.DataFrame, regressors: list, top_n: Optional[int]=None):
 	"""Calculate the average correlation between exogenous and endogenous
 	for positional players.
@@ -88,13 +119,11 @@ def avg_player_corr(players: pd.DataFrame, regressors: list, top_n: Optional[int
 	Returns:
 		_type_: _description_
 	"""
-	# Calculate number of players to search for
-	if top_n is None:
-		n = len(players)
-	else:
-		n = min(top_n, len(players))
+	n = num_players(players, top_n)
+
 	# Sort players by total points
 	players.sort_values(by=["total_points"], ascending=False, inplace=True)
+
 	# Calculate correlations
 	corr = 0.
 	for idx, p in players.iloc[:n,:].iterrows():
@@ -105,7 +134,37 @@ def avg_player_corr(players: pd.DataFrame, regressors: list, top_n: Optional[int
 		# Calculate uniformly weighted correlation
 		corr += (1./n)*df[regressors].select_dtypes('number').corr()
 	return corr
-	
+
+def regressions(players: pd.DataFrame, exo: list, endo: str, top_n: Optional[int]=None):
+	"""Calculate the multivariate linear regression for a player over their season
+	using the regressors supplied by the user. A set of ``n`` regressions will be performed.
+
+	Args:
+		players (pd.DataFrame): _description_
+		exo (list): _description_
+		top_n (int): Will only use this number of players ranked from top by total points.
+		 Defaults to None.
+
+	Returns:
+		_type_: _description_
+	"""
+	n = num_players(players, top_n)
+
+	# Sort players by total points
+	players.sort_values(by=["total_points"], ascending=False, inplace=True)
+	results = []
+	# Iterate through players, get detailed information, add features and perform regression.
+	for idx, p in players.iloc[:n,:].iterrows():
+		# Query stats
+		df = recent_stats(p["id"])
+		# Use featurizer
+		df = featurizer(df)
+		# Endogenous
+		Y = df[endo].values
+		X = sm.add_constant(df[exo].values)
+		model = sm.OLS(Y, X)
+		results += [model.fit()]
+		return results
 
 def forward_form(player_id: int):
 	"""Calculates the current form of a forward by linear weights associated
@@ -145,10 +204,25 @@ if __name__ == "__main__":
 		"total_points"
 		]
 	# This includes getting recent data and featurizing the data
-	corr = avg_player_corr(fwds, regressors, 15)
-	sns.heatmap(corr, annot=True)
+	# corr = avg_player_corr(fwds, regressors, 15)
+	# sns.heatmap(corr, annot=True)
 
-	# 
+	# Perform regression analysis for each player over their season.
+	# This is used to forward forecast individual player points
+	# The prediction intervals may be a function of the stochastic nature or the exogenous variables
+	# As well as systematic component.
+	exog = ["ict_index", "expected_goals", "fixture"]
+	endog = ["goals_scored"]
+	results = regressions(fwds, exog, endog, 1)
+	insample = results[0].get_prediction().summary_frame(alpha=0.5)
+	insample.plot(y=["mean", "obs_ci_lower", "obs_ci_upper"])
+
+	# Plot the original points as well
+	plt.scatter(insample.index.values, results[0].model.endog)
+
+	# Produce a forecast with prediction intervals based on estimated ict, excess xG and excess xA
+	
+
 
 	# Plot the selected regressors over the gameweeks
 	# g = sns.PairGrid(df[regressors])
